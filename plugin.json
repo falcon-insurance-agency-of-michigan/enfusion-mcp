@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "enfusion-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP tools for Enfusion Engine and the Arma Reforger SDK.",
+  "author": { "name": "s0wingseason", "url": "https://github.com/s0wingseason" },
+  "homepage": "https://github.com/s0wingseason/enfusion-mcp",
+  "repository": "https://github.com/s0wingseason/enfusion-mcp",
+  "license": "MIT",
+  "keywords": ["enfusion", "arma-reforger", "mcp", "modding", "workbench"]
+}

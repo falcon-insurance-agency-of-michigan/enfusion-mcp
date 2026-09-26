@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "enfusion": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["dist/server.cjs"],
+      "cwd": ".",
+      "tool_timeout_sec": 330
+    }
+  }
+}

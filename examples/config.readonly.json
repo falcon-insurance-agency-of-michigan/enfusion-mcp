@@ -1,0 +1,5 @@
+{
+  "projects": [
+    { "id": "my-mod", "root": "/home/you/ArmaMods/MyMod", "writable": false }
+  ]
+}

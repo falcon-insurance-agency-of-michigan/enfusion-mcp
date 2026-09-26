@@ -1,0 +1,62 @@
+{
+  "name": "enfusion-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server and Codex plugin for Enfusion Engine / Arma Reforger SDK",
+  "main": "dist/server.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check": "npm run typecheck && npm test",
+    "test:live": "node scripts/live-smoke.mjs",
+    "release": "node scripts/package.mjs",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "enfusion",
+    "arma-reforger",
+    "workbench",
+    "codex-plugin"
+  ],
+  "author": "s0wingseason",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.1.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.1.0",
+    "@types/node": "^26.6.3",
+    "esbuild": "^0.28.2",
+    "fflate": "^0.8.3",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "enfusion-mcp": "dist/server.cjs"
+  },
+  "files": [
+    "dist/server.cjs",
+    "dist/THIRD-PARTY-NOTICES.txt",
+    "workbench",
+    "skills",
+    ".codex-plugin",
+    ".mcp.json",
+    "plugin.json",
+    "mcp.json",
+    "CHANGELOG.md",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "repository": {
+    "url": "https://github.com/s0wingseason/enfusion-mcp.git",
+    "type": "git"
+  }
+}

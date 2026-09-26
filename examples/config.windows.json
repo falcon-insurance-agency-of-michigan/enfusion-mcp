@@ -1,0 +1,10 @@
+{
+  "projects": [
+    { "id": "my-mod", "root": "C:/ArmaMods/MyMod", "writable": true }
+  ],
+  "workbenchPath": "C:/Program Files (x86)/Steam/steamapps/common/Arma Reforger Tools/Workbench/ArmaReforgerWorkbenchSteamDiag.exe",
+  "addonRoots": ["C:/Program Files (x86)/Steam/steamapps/common/Arma Reforger/addons"],
+  "allowLaunch": false,
+  "maxFileBytes": 1048576,
+  "maxScanEntries": 20000
+}
