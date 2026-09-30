@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 export function maskComments(text: string, strings = false): string {
   return text.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)/g, token => {
     if (!strings && (token.startsWith('"') || token.startsWith("'"))) return token;
@@ -153,6 +155,277 @@ export function buildDependencyGraph(
   const unresolvedGuids = [...allGuids].filter(g => !resolvedGuids.has(g)).slice(0, 200);
   return { edges: edges.slice(0, 2000), unresolvedGuids, stats: { files: fileContents.length, edges: edges.length, uniqueGuids: allGuids.size } };
 }
+
+export type FunctionDecl = { name: string; returnType: string | null; params: string; className: string | null; modifiers: string[]; line: number };
+
+export function scriptFunctions(text: string): FunctionDecl[] {
+  const clean = maskComments(text, true);
+  const results: FunctionDecl[] = [];
+  // Match function declarations: [modifiers] ReturnType FunctionName(params)
+  // Enforce script uses C-like syntax with optional modifiers like override, protected, static, private
+  const funcRe = /\b((?:(?:static|override|protected|private|proto|sealed|event)\s+)*)(\w+)\s+(\w+)\s*\(([^)]*)\)\s*(?:\{|;)/g;
+  let currentClass: string | null = null;
+  // Track class context by scanning class declarations
+  const classStarts: { name: string; line: number }[] = [];
+  for (const m of clean.matchAll(/\b(?:modded\s+)?class\s+(\w+)/g)) {
+    classStarts.push({ name: m[1]!, line: clean.slice(0, m.index).split('\n').length });
+  }
+  for (const m of clean.matchAll(funcRe)) {
+    const line = clean.slice(0, m.index).split('\n').length;
+    // Determine enclosing class
+    currentClass = null;
+    for (const cs of classStarts) { if (cs.line < line) currentClass = cs.name; else break; }
+    const modifiers = m[1]!.trim().split(/\s+/).filter(Boolean);
+    const returnType = m[2]!;
+    const name = m[3]!;
+    const params = m[4]!.trim();
+    // Skip false positives: control flow like if(), while(), for(), switch()
+    if (/^(if|else|while|for|switch|return|new|delete|foreach|do)$/.test(name)) continue;
+    // Skip type-only matches where return type is a type declaration keyword
+    if (/^(class|enum|typedef)$/.test(returnType) && !modifiers.length) continue;
+    results.push({ name, returnType, params, className: currentClass, modifiers, line });
+  }
+  return results.slice(0, 1000);
+}
+
+export type ClassNode = { name: string; base: string | null; modded: boolean; file: string; line: number; methods: string[] };
+export type ClassTree = { classes: ClassNode[]; roots: string[]; orphans: string[] };
+
+export function buildClassHierarchy(files: { path: string; text: string }[]): ClassTree {
+  const classes: ClassNode[] = [];
+  for (const file of files) {
+    const symbols = scriptSymbols(file.text);
+    const functions = scriptFunctions(file.text);
+    for (const sym of symbols) {
+      if (sym.kind === 'class') {
+        const methods = functions.filter(f => f.className === sym.name).map(f => f.name);
+        classes.push({ name: sym.name!, base: sym.base, modded: sym.modded, file: file.path, line: sym.line, methods });
+      }
+    }
+  }
+  const classNames = new Set(classes.map(c => c.name));
+  const roots = classes.filter(c => !c.base || !classNames.has(c.base)).map(c => c.name);
+  const orphans = classes.filter(c => c.base && !classNames.has(c.base) && !c.modded).map(c => c.name);
+  return { classes: classes.slice(0, 500), roots, orphans };
+}
+
+export type MetaFileInfo = { guid: string | null; resourcePath: string | null; resourceName: string | null; dependencies: { guid: string; path: string }[]; warnings: string[] };
+
+export function metaInfo(text: string): MetaFileInfo {
+  const clean = maskComments(text);
+  const warnings: string[] = [];
+  const nameMatch = /\bName\s+"\{([A-Fa-f0-9]{16})\}([^"\r\n]*)"/u.exec(clean);
+  const guid = nameMatch?.[1]?.toUpperCase() ?? null;
+  const resourcePath = nameMatch?.[2] ?? null;
+  const resourceName = nameMatch ? `{${nameMatch[1]}}${nameMatch[2]}` : null;
+  // Extract dependency references (everything except the Name field)
+  const dependencies: { guid: string; path: string }[] = [];
+  const depRe = /\bDependency\s+"\{([A-Fa-f0-9]{16})\}([^"\r\n]*)"/gu;
+  for (const m of clean.matchAll(depRe)) {
+    dependencies.push({ guid: m[1]!.toUpperCase(), path: m[2]! });
+  }
+  // Also catch non-Name GUID references
+  const allRefs = resourceReferences(clean);
+  for (const ref of allRefs) {
+    if (ref.guid !== guid && !dependencies.find(d => d.guid === ref.guid)) {
+      dependencies.push({ guid: ref.guid, path: ref.path });
+    }
+  }
+  if (!guid) warnings.push('No ownership GUID found in Name field');
+  if (!resourcePath) warnings.push('No resource path found');
+  return { guid, resourcePath, resourceName, dependencies: dependencies.slice(0, 200), warnings };
+}
+
+export function extractStrings(text: string): { value: string; line: number; context: string }[] {
+  const results: { value: string; line: number; context: string }[] = [];
+  const lines = text.split(/\r?\n/u);
+  for (let i = 0; i < lines.length; i++) {
+    for (const m of lines[i]!.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)) {
+      const value = m[1]!;
+      // Skip GUIDs, empty strings, single chars, and obvious non-localizable content
+      if (!value || value.length < 2 || /^[A-Fa-f0-9]{16}$/.test(value) || /^\{[A-Fa-f0-9]{16}\}/.test(value)) continue;
+      if (/^[.\/\\]/.test(value) || /\.\w{1,5}$/.test(value)) continue; // file paths
+      results.push({ value, line: i + 1, context: lines[i]!.trim().slice(0, 200) });
+    }
+  }
+  return results.slice(0, 1000);
+}
+
+export type FileStats = { totalFiles: number; byExtension: Record<string, number>; scriptFiles: number; prefabFiles: number; worldFiles: number; layoutFiles: number; configFiles: number; metaFiles: number; totalScriptLines: number };
+
+export function computeFileStats(files: string[], lineCountsByFile?: Map<string, number>): FileStats {
+  const byExtension: Record<string, number> = {};
+  let scriptFiles = 0, prefabFiles = 0, worldFiles = 0, layoutFiles = 0, configFiles = 0, metaFiles = 0, totalScriptLines = 0;
+  for (const f of files) {
+    const ext = path.extname(f).toLowerCase();
+    byExtension[ext] = (byExtension[ext] ?? 0) + 1;
+    if (ext === '.c' || ext === '.h' || ext === '.cpp') { scriptFiles++; totalScriptLines += lineCountsByFile?.get(f) ?? 0; }
+    if (ext === '.et') prefabFiles++;
+    if (ext === '.ent') worldFiles++;
+    if (ext === '.layout') layoutFiles++;
+    if (ext === '.conf') configFiles++;
+    if (ext === '.meta') metaFiles++;
+  }
+  return { totalFiles: files.length, byExtension, scriptFiles, prefabFiles, worldFiles, layoutFiles, configFiles, metaFiles, totalScriptLines };
+}
+
+
+export const SCRIPT_TEMPLATES: Record<string, { description: string; template: string }> = {
+  'modded-class': {
+    description: 'Modded class override for an existing game class',
+    template: `modded class {{BASE_CLASS}}
+{
+\toverride void {{METHOD}}()
+\t{
+\t\tsuper.{{METHOD}}();
+\t\t// Custom logic here
+\t}
+}
+`,
+  },
+  'component': {
+    description: 'New entity component class',
+    template: `[ComponentEditorProps({{CLASS_NAME}}Class, description: "{{DESCRIPTION}}")]
+class {{CLASS_NAME}}Class : ScriptComponentClass
+{
+}
+
+class {{CLASS_NAME}} : ScriptComponent
+{
+\toverride void OnPostInit(IEntity owner)
+\t{
+\t\tsuper.OnPostInit(owner);
+\t\tSetEventMask(owner, EntityEvent.INIT);
+\t}
+
+\toverride void EOnInit(IEntity owner)
+\t{
+\t\t// Initialization logic
+\t}
+}
+`,
+  },
+  'game-mode': {
+    description: 'Custom game mode extending SCR_BaseGameMode',
+    template: `[BaseContainerProps()]
+modded class SCR_BaseGameMode
+{
+\toverride void OnGameStart()
+\t{
+\t\tsuper.OnGameStart();
+\t\t// Game start logic
+\t}
+
+\toverride void OnPlayerConnected(int playerId)
+\t{
+\t\tsuper.OnPlayerConnected(playerId);
+\t\t// Player connected logic
+\t}
+
+\toverride void OnPlayerDisconnected(int playerId, KickCauseGroup cause, int timeout)
+\t{
+\t\tsuper.OnPlayerDisconnected(playerId, cause, timeout);
+\t\t// Player disconnected logic
+\t}
+}
+`,
+  },
+  'rpc-component': {
+    description: 'Component with RPC (Remote Procedure Call) methods for multiplayer',
+    template: `class {{CLASS_NAME}} : ScriptComponent
+{
+\t[RplProp()]
+\tprotected int m_iSyncedValue;
+
+\toverride void OnPostInit(IEntity owner)
+\t{
+\t\tsuper.OnPostInit(owner);
+\t\tRplComponent.ShouldNotify(this);
+\t}
+
+\t[RplRpc(RplChannel.Reliable, RplRcver.Server)]
+\tvoid RpcAsk_ServerAction(int param)
+\t{
+\t\t// Runs on server
+\t\tm_iSyncedValue = param;
+\t\tBroadcast_ClientUpdate(param);
+\t}
+
+\t[RplRpc(RplChannel.Reliable, RplRcver.Broadcast)]
+\tvoid Broadcast_ClientUpdate(int param)
+\t{
+\t\t// Runs on all clients
+\t}
+}
+`,
+  },
+  'action': {
+    description: 'Custom user action (interact prompt)',
+    template: `class {{CLASS_NAME}} : ScriptedUserAction
+{
+\toverride void PerformAction(IEntity pOwnerEntity, IEntity pUserEntity)
+\t{
+\t\t// Action logic when player interacts
+\t}
+
+\toverride bool CanBePerformedScript(IEntity user)
+\t{
+\t\treturn true;
+\t}
+
+\toverride bool CanBeShownScript(IEntity user)
+\t{
+\t\treturn true;
+\t}
+
+\toverride bool GetActionNameScript(out string outName)
+\t{
+\t\toutName = "{{ACTION_NAME}}";
+\t\treturn true;
+\t}
+}
+`,
+  },
+  'inventory-item': {
+    description: 'Custom inventory item component',
+    template: `[ComponentEditorProps({{CLASS_NAME}}Class, description: "{{DESCRIPTION}}")]
+class {{CLASS_NAME}}Class : SCR_InventoryItemComponentClass
+{
+}
+
+class {{CLASS_NAME}} : SCR_InventoryItemComponent
+{
+\toverride bool CanBeInserted(InventoryStorageSlot slot)
+\t{
+\t\treturn true;
+\t}
+
+\toverride void OnItemUsed(IEntity owner, IEntity user)
+\t{
+\t\t// Item use logic
+\t}
+}
+`,
+  },
+  'workbench-plugin': {
+    description: 'Workbench editor plugin',
+    template: `[WorkbenchPluginAttribute(name: "{{PLUGIN_NAME}}", description: "{{DESCRIPTION}}", shortcut: "", color: "0 0 0 0", icon: "", wbModules: {"ResourceManager", "ScriptEditor"})]
+class {{CLASS_NAME}} : WorkbenchPlugin
+{
+\toverride void Run()
+\t{
+\t\t// Plugin logic
+\t\tPrint("{{PLUGIN_NAME}} executed");
+\t}
+
+\t[ButtonAttribute("OK")]
+\tvoid OkButton()
+\t{
+\t}
+}
+`,
+  },
+};
 
 export const DOCS = [
   { title: 'Mod project setup', topics: 'project gproj dependencies steam install', url: 'https://community.bistudio.com/wiki/Arma_Reforger:Mod_Project_Setup' },

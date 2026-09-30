@@ -9,7 +9,7 @@ for (const mode of ['legacy', { pin: '2026-07-28' }]) {
     const { configPath } = await fixture(t);
     const { client, stderr } = await connect(t, configPath, mode);
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 25);
+    assert.equal(tools.tools.length, 35);
     assert(tools.tools.find(t => t.name === 'enfusion_write_file').annotations.destructiveHint);
     const status = await call(client, 'enfusion_status');
     assert.equal(status.projects[0].id, 'mod');

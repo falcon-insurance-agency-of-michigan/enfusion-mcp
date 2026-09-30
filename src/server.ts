@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from './config.js';
 import { VERSION } from './config.js';
 import { Workspace, isText } from './workspace.js';
-import { DOCS, buildDependencyGraph, configInfo, layoutInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptSymbols, worldInfo } from './analysis.js';
+import { DOCS, SCRIPT_TEMPLATES, buildClassHierarchy, buildDependencyGraph, computeFileStats, configInfo, extractStrings, layoutInfo, metaInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptFunctions, scriptSymbols, worldInfo } from './analysis.js';
 import { Workbench } from './workbench.js';
 
 const project = z.string().min(1).max(64).describe('Configured project id from enfusion_status');
@@ -229,6 +229,164 @@ export function createServer(config: Config): McpServer {
   });
 
   tool('enfusion_file_history', 'List backup versions of a file from .enfusion-mcp/backups/. Shows what previous SHA-256 hashes were saved, allowing recovery of prior edits.', { project, path: relative }, async args => workspace.listBackups(args.project, args.path));
+
+  // ===== NEW TOOLS (v0.3.0) =====
+
+  tool('enfusion_script_functions', 'Extract function/method declarations from an Enforce Script .c file: name, return type, parameters, enclosing class, and modifiers (static, override, protected, etc). Lightweight index, not a compiler.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.c') throw new Error('Expected an Enforce Script .c file');
+    return { path: args.path, functions: scriptFunctions((await workspace.read(args.project, args.path)).text), scope: 'Function declarations only; no overload resolution or type inference' };
+  });
+
+  tool('enfusion_class_hierarchy', 'Build class inheritance tree across all .c files in the project. Shows base classes, modded overrides, method lists, root classes, and orphans (classes extending unknown bases). Scans up to byte budget.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const filename of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesRead += bytes;
+        files.push({ path: filename, text });
+      } catch { /* skip unreadable */ }
+    }
+    return { ...buildClassHierarchy(files), filesScanned: files.length, bytesInspected: bytesRead, scanTruncated: scan.truncated, scope: 'This project only; engine base classes not available' };
+  });
+
+  tool('enfusion_meta_info', 'Parse a .meta resource metadata file: extract ownership GUID, resource path, and dependency references. Essential for understanding resource registration.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.meta') throw new Error('Expected a .meta resource metadata file');
+    return { path: args.path, ...metaInfo((await workspace.read(args.project, args.path)).text) };
+  });
+
+  tool('enfusion_regex_search', 'Search project files using a regular expression pattern. Returns file/line matches. Pattern is validated before execution; flags are fixed to case-insensitive multiline.', { project, pattern: z.string().min(1).max(512), extension: z.string().regex(/^\.[a-zA-Z0-9]+$/).optional(), limit }, async args => {
+    let re: RegExp;
+    try { re = new RegExp(args.pattern, 'gim'); } catch (e) { throw new Error(`Invalid regex: ${(e as Error).message}`); }
+    const scan = await workspace.list(args.project);
+    const matches: { path: string; line: number; text: string; match: string }[] = [];
+    let bytesInspected = 0;
+    for (const filename of scan.files.filter(f => isText(f) && (!args.extension || path.extname(f).toLowerCase() === args.extension.toLowerCase()))) {
+      if (bytesInspected >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesInspected += bytes;
+        const lines = text.split(/\r?\n/u);
+        for (let i = 0; i < lines.length; i++) {
+          re.lastIndex = 0;
+          const m = re.exec(lines[i]!);
+          if (m) {
+            matches.push({ path: filename, line: i + 1, text: lines[i]!.slice(0, 1500), match: m[0].slice(0, 500) });
+            if (matches.length >= args.limit) break;
+          }
+        }
+        if (matches.length >= args.limit) break;
+      } catch { /* skip unreadable */ }
+    }
+    return { matches, hasMore: matches.length >= args.limit, bytesInspected, scanTruncated: scan.truncated };
+  });
+
+  tool('enfusion_extract_strings', 'Extract string literals from a source file for localization review. Filters out GUIDs, file paths, and single-character strings. Shows context.', { project, path: relative }, async args => {
+    const { text } = await workspace.read(args.project, args.path);
+    return { path: args.path, strings: extractStrings(text), scope: 'String literals in double quotes; does not detect runtime-constructed strings' };
+  });
+
+  tool('enfusion_file_stats', 'Compute project statistics: file counts by extension, script lines of code, prefab/world/layout/config/meta counts. Quick project health overview.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    // Count lines for script files
+    const lineCountsByFile = new Map<string, number>();
+    let bytesRead = 0;
+    for (const filename of scan.files.filter(f => /\.(c|h|cpp)$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesRead += bytes;
+        lineCountsByFile.set(filename, text.split(/\r?\n/u).length);
+      } catch { /* skip */ }
+    }
+    return { ...computeFileStats(scan.files, lineCountsByFile), scanTruncated: scan.truncated, bytesInspected: bytesRead };
+  });
+
+  tool('enfusion_scaffold_script', 'Generate boilerplate Enforce Script code from templates: modded-class, component, game-mode, rpc-component, action, inventory-item, workbench-plugin. Substitutes {{PLACEHOLDER}} variables.', { template: z.enum(['modded-class', 'component', 'game-mode', 'rpc-component', 'action', 'inventory-item', 'workbench-plugin']), variables: z.record(z.string(), z.string().max(128)).default({}) }, async args => {
+    const tmpl = SCRIPT_TEMPLATES[args.template];
+    if (!tmpl) throw new Error(`Unknown template: ${args.template}`);
+    let code = tmpl.template;
+    for (const [key, value] of Object.entries(args.variables) as [string, string][]) {
+      code = code.replaceAll(`{{${key.toUpperCase()}}}`, value);
+    }
+    // List remaining unresolved placeholders
+    const remaining = [...code.matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]!);
+    return { template: args.template, description: tmpl.description, code, unresolvedPlaceholders: [...new Set(remaining)] };
+  });
+
+  tool('enfusion_compare_files', 'Diff two project files against each other. Returns a line-by-line unified diff. Read-only; does not modify either file.', { project, pathA: relative, pathB: relative }, async args => {
+    const fileA = await workspace.read(args.project, args.pathA);
+    const fileB = await workspace.read(args.project, args.pathB);
+    const linesA = fileA.text.split(/\r?\n/u);
+    const linesB = fileB.text.split(/\r?\n/u);
+    const hunks: { startA: number; startB: number; linesA: string[]; linesB: string[] }[] = [];
+    let i = 0, j = 0;
+    while (i < linesA.length || j < linesB.length) {
+      if (i < linesA.length && j < linesB.length && linesA[i] === linesB[j]) { i++; j++; continue; }
+      const startA = i, startB = j;
+      const hunkA: string[] = [], hunkB: string[] = [];
+      while (i < linesA.length || j < linesB.length) {
+        if (i < linesA.length && j < linesB.length && linesA[i] === linesB[j]) break;
+        if (i < linesA.length) hunkA.push(linesA[i++]!);
+        if (j < linesB.length) hunkB.push(linesB[j++]!);
+      }
+      hunks.push({ startA: startA + 1, startB: startB + 1, linesA: hunkA, linesB: hunkB });
+      if (hunks.length >= 100) break;
+    }
+    const diffLines: string[] = [`--- a/${args.pathA}`, `+++ b/${args.pathB}`];
+    for (const hunk of hunks) {
+      diffLines.push(`@@ -${hunk.startA},${hunk.linesA.length} +${hunk.startB},${hunk.linesB.length} @@`);
+      for (const line of hunk.linesA) diffLines.push(`-${line}`);
+      for (const line of hunk.linesB) diffLines.push(`+${line}`);
+    }
+    return { pathA: args.pathA, pathB: args.pathB, sha256A: fileA.sha256, sha256B: fileB.sha256, hunks: hunks.length, identical: hunks.length === 0, diff: diffLines.join('\n'), totalLinesA: linesA.length, totalLinesB: linesB.length };
+  });
+
+  tool('enfusion_validate_references', 'Check all {GUID}path resource references in a file against the project .meta ownership records. Reports which references are resolvable and which are missing.', { project, path: relative }, async args => {
+    const { text } = await workspace.read(args.project, args.path);
+    const refs = resourceReferences(text);
+    if (refs.length === 0) return { path: args.path, totalReferences: 0, resolved: [], unresolved: [], scope: 'No resource references found in file' };
+    // Build meta ownership map
+    const scan = await workspace.list(args.project);
+    const metaOwnership = new Map<string, { resource: string; name: string }>();
+    for (const filename of scan.files.filter(f => /\.meta$/iu.test(f))) {
+      try {
+        const { text: metaText } = await workspace.read(args.project, filename);
+        const mi = metaInfo(metaText);
+        if (mi.guid) metaOwnership.set(mi.guid, { resource: filename.slice(0, -5), name: mi.resourceName ?? '' });
+      } catch { /* skip */ }
+    }
+    const resolved: { guid: string; path: string; line: number; resource: string }[] = [];
+    const unresolved: { guid: string; path: string; line: number }[] = [];
+    for (const ref of refs) {
+      const owner = metaOwnership.get(ref.guid);
+      if (owner) resolved.push({ ...ref, resource: owner.resource });
+      else unresolved.push(ref);
+    }
+    return { path: args.path, totalReferences: refs.length, resolved, unresolved, scanTruncated: scan.truncated, scope: 'Loose files in this project only; engine/PAK resources not indexed' };
+  });
+
+  tool('enfusion_find_implementations', 'Find all classes that extend or mod a given base class. Searches all .c files in the project. Useful for tracing inheritance chains and finding overrides.', { project, className: z.string().min(1).max(128) }, async args => {
+    const scan = await workspace.list(args.project);
+    const results: { file: string; name: string; base: string; modded: boolean; line: number }[] = [];
+    let bytesRead = 0;
+    for (const filename of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesRead += bytes;
+        const symbols = scriptSymbols(text);
+        for (const sym of symbols) {
+          if (sym.kind === 'class' && sym.base === args.className) {
+            results.push({ file: filename, name: sym.name!, base: sym.base, modded: sym.modded, line: sym.line });
+          }
+        }
+      } catch { /* skip */ }
+    }
+    return { className: args.className, implementations: results, total: results.length, bytesInspected: bytesRead, scanTruncated: scan.truncated };
+  });
 
   // ===== RESOURCES & PROMPTS =====
 
