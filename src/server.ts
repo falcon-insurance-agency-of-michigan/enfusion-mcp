@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from './config.js';
 import { VERSION } from './config.js';
 import { Workspace, isText } from './workspace.js';
-import { DOCS, parseDiagnostics, projectInfo, resourceReferences, scriptSymbols } from './analysis.js';
+import { DOCS, buildDependencyGraph, configInfo, layoutInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptSymbols, worldInfo } from './analysis.js';
 import { Workbench } from './workbench.js';
 
 const project = z.string().min(1).max(64).describe('Configured project id from enfusion_status');
@@ -31,6 +31,8 @@ export function createServer(config: Config): McpServer {
     });
   }
   const status = () => ({ version: VERSION, transport: 'stdio', platform: process.platform, projects: config.projects, workbench: { path: config.workbenchPath ?? null, allowLaunch: config.allowLaunch, nativeSupported: process.platform === 'win32' }, limits: { maxFileBytes: config.maxFileBytes, maxScanEntries: config.maxScanEntries }, note: 'No roots are exposed until configured. SDK/game content inside PAK archives is not indexed.' });
+
+  // ===== ORIGINAL TOOLS (v0.1.0) =====
 
   tool('enfusion_status', 'Show configured projects, permissions, Workbench settings and scan limits.', {}, async () => status());
 
@@ -99,7 +101,7 @@ export function createServer(config: Config): McpServer {
 
   tool('enfusion_write_file', 'Create or replace a supported source file in a writable project. Existing files require expectedSha256 from read_file; saves an original-byte backup. Does not compile.', { project, path: relative, content: z.string().max(8 * 1024 * 1024), expectedSha256: digest.optional() }, async args => workspace.write(args.project, args.path, args.content, args.expectedSha256), false);
 
-  tool('enfusion_create_project', 'Create addon.gproj inside an already-configured writable directory. Refuses an existing descriptor; generates a new GUID with selected dependencies.', { project, id: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/), title: z.string().min(1).max(128).regex(/^[^"\\\r\n\u0000-\u001f]+$/u), dependencies: z.array(z.string().regex(/^[A-Fa-f0-9]{16}$/)).max(64).default(['58D0FB3206B6F859']) }, async args => {
+  tool('enfusion_create_project', 'Create addon.gproj inside an already-configured writable directory. Refuses an existing descriptor; generates a new GUID with selected dependencies.', { project, id: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/), title: z.string().min(1).max(128).regex(/^[^\x22\\\r\n\x00-\x1f]+$/u), dependencies: z.array(z.string().regex(/^[A-Fa-f0-9]{16}$/)).max(64).default(['58D0FB3206B6F859']) }, async args => {
     const guid = randomBytes(8).toString('hex').toUpperCase();
     const dependencies = [...new Set(args.dependencies.map(d => d.toUpperCase()))];
     const content = `GameProject {\n ID "${args.id}"\n GUID "${guid}"\n TITLE "${args.title}"\n Dependencies {\n${dependencies.map(d => `  "${d}"`).join('\n')}\n }\n Configurations {\n  GameProjectConfig PC {\n  }\n  GameProjectConfig HEADLESS : PC {\n  }\n }\n}\n`;
@@ -110,12 +112,125 @@ export function createServer(config: Config): McpServer {
 
   tool('enfusion_docs', 'Search a curated offline catalog of official Bohemia documentation links. Does not fetch current page contents.', { query: z.string().max(256).default('') }, async args => {
     const words = args.query.toLowerCase().split(/\s+/u).filter(Boolean);
-    return { documents: DOCS.filter(d => words.every(w => `${d.title} ${d.topics}`.toLowerCase().includes(w))), catalogVerified: '2026-09-26' };
+    return { documents: DOCS.filter(d => words.every(w => `${d.title} ${d.topics}`.toLowerCase().includes(w))), catalogVerified: '2026-09-30' };
   });
 
   tool('enfusion_install_companion', 'Install the original EMCP_ValidatePlugin.c into this writable mod. Refuses to overwrite a different file; does not change base game files.', { project }, async args => workbench.installCompanion(args.project), false);
   tool('enfusion_workbench_launch', 'Preview or launch the configured Workbench executable with documented project/module/load arguments. Launch can open the editor; success means process started only.', { project, gproj: relative.default('addon.gproj'), module: z.enum(['ResourceManager', 'ScriptEditor', 'WorldEditor']).default('ResourceManager'), load: relative.optional(), dryRun: z.boolean().default(true) }, async args => workbench.launch(args.project, args.gproj, args.module, args.load, args.dryRun), false);
   tool('enfusion_workbench_validate', 'Start an isolated Workbench run using the installed validation companion, collect engine logs and require a fresh marker. Does not build game assets or test gameplay.', { project, gproj: relative.default('addon.gproj'), timeoutSeconds: z.number().int().min(5).max(300).default(90) }, async (args, signal) => workbench.validate(args.project, args.gproj, args.timeoutSeconds, signal), false);
+
+  // ===== NEW TOOLS (v0.2.0) =====
+
+  tool('enfusion_prefab_info', 'Parse a .et prefab file: extract root class, parent prefab, component list with properties, and entity count. Text inspection only; Workbench is authoritative.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.et') throw new Error('Expected an Enfusion prefab .et file');
+    return { path: args.path, ...prefabInfo((await workspace.read(args.project, args.path)).text) };
+  });
+
+  tool('enfusion_world_info', 'Parse a .ent world file: extract layers, total entity count, and referenced prefabs. Text inspection only; Workbench is authoritative.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.ent') throw new Error('Expected an Enfusion world .ent file');
+    return { path: args.path, ...worldInfo((await workspace.read(args.project, args.path)).text) };
+  });
+
+  tool('enfusion_config_info', 'Parse a .conf configuration file: extract key-value entries and block structure. Text inspection only.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.conf') throw new Error('Expected an Enfusion .conf file');
+    return { path: args.path, ...configInfo((await workspace.read(args.project, args.path)).text) };
+  });
+
+  tool('enfusion_layout_info', 'Parse a .layout UI file: extract widget hierarchy, names, slots, and referenced resources. Text inspection only.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.layout') throw new Error('Expected an Enfusion .layout file');
+    return { path: args.path, ...layoutInfo((await workspace.read(args.project, args.path)).text) };
+  });
+
+  tool('enfusion_dependency_graph', 'Build a resource dependency graph across the project. Maps all {GUID}path references to .meta ownership records. Reports unresolved GUIDs. Scans readable text files up to a byte budget.', { project, extension: z.string().regex(/^\.[a-zA-Z0-9]+$/).optional() }, async args => {
+    const scan = await workspace.list(args.project);
+    // Build meta ownership map
+    const metaOwnership = new Map<string, { resource: string; name: string }>();
+    for (const filename of scan.files.filter(f => /\.meta$/iu.test(f))) {
+      try {
+        const { text } = await workspace.read(args.project, filename);
+        const owner = /\bName\s+"\{([A-Fa-f0-9]{16})\}([^"\r\n]*)"/u.exec(text);
+        if (owner?.[1]) metaOwnership.set(owner[1].toUpperCase(), { resource: filename.slice(0, -5), name: `{${owner[1]}}${owner[2]}` });
+      } catch { /* skip unreadable */ }
+    }
+    // Collect file contents
+    const fileContents: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const filename of scan.files.filter(f => isText(f) && !f.endsWith('.meta') && (!args.extension || path.extname(f).toLowerCase() === args.extension.toLowerCase()))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesRead += bytes;
+        if (resourceReferences(text).length > 0) fileContents.push({ path: filename, text });
+      } catch { /* skip unreadable */ }
+    }
+    return { ...buildDependencyGraph(fileContents, metaOwnership), scanTruncated: scan.truncated, bytesInspected: bytesRead, scope: 'Loose files in this configured project only; GUIDs from dependencies or PAK archives are not resolved.' };
+  });
+
+  tool('enfusion_rename_file', 'Rename a source file within a writable project. Requires the current SHA-256 from read_file. Backs up the original; does not update references.', { project, from: relative, to: relative, expectedSha256: digest }, async args => workspace.renameFile(args.project, args.from, args.to, args.expectedSha256), false);
+
+  tool('enfusion_delete_file', 'Delete a source file from a writable project. Requires the current SHA-256 from read_file. Backs up the file before deletion.', { project, path: relative, expectedSha256: digest }, async args => workspace.deleteFile(args.project, args.path, args.expectedSha256), false);
+
+  tool('enfusion_diff_file', 'Compare the current file content against a proposed edit and return a line-by-line unified diff. Read-only preview; does not modify the file.', { project, path: relative, proposed: z.string().max(8 * 1024 * 1024) }, async args => {
+    const current = await workspace.read(args.project, args.path);
+    const oldLines = current.text.split(/\r?\n/u);
+    const newLines = args.proposed.split(/\r?\n/u);
+    // Simple line diff: find changed regions
+    const hunks: { startOld: number; startNew: number; oldLines: string[]; newLines: string[] }[] = [];
+    let i = 0, j = 0;
+    while (i < oldLines.length || j < newLines.length) {
+      if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) { i++; j++; continue; }
+      const startOld = i, startNew = j;
+      const hunkOld: string[] = [], hunkNew: string[] = [];
+      // Consume differing lines until we find a common line or exhaust both
+      while (i < oldLines.length || j < newLines.length) {
+        if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) break;
+        if (i < oldLines.length) hunkOld.push(oldLines[i++]!);
+        if (j < newLines.length) hunkNew.push(newLines[j++]!);
+      }
+      hunks.push({ startOld: startOld + 1, startNew: startNew + 1, oldLines: hunkOld, newLines: hunkNew });
+      if (hunks.length >= 100) break;
+    }
+    // Build unified diff text
+    const diffLines: string[] = [`--- a/${args.path}`, `+++ b/${args.path}`];
+    for (const hunk of hunks) {
+      diffLines.push(`@@ -${hunk.startOld},${hunk.oldLines.length} +${hunk.startNew},${hunk.newLines.length} @@`);
+      for (const line of hunk.oldLines) diffLines.push(`-${line}`);
+      for (const line of hunk.newLines) diffLines.push(`+${line}`);
+    }
+    return { path: args.path, sha256: current.sha256, hunks: hunks.length, identical: hunks.length === 0, diff: diffLines.join('\n'), totalLinesOld: oldLines.length, totalLinesNew: newLines.length };
+  });
+
+  tool('enfusion_batch_search', 'Search for multiple queries at once across the project. More efficient than separate calls when checking several identifiers or strings.', { project, queries: z.array(z.string().min(1).max(256)).min(1).max(20), caseSensitive: z.boolean().default(false), extension: z.string().regex(/^\.[a-zA-Z0-9]+$/).optional(), limitPerQuery: z.number().int().min(1).max(50).default(10) }, async args => {
+    const scan = await workspace.list(args.project);
+    const results: Record<string, { matches: { path: string; line: number; text: string }[]; hasMore: boolean }> = {};
+    for (const q of args.queries) results[q] = { matches: [], hasMore: false };
+    const normalizedQueries = args.queries.map(q => args.caseSensitive ? q : q.toLowerCase());
+    let bytesInspected = 0;
+    for (const filename of scan.files.filter(f => isText(f) && (!args.extension || path.extname(f).toLowerCase() === args.extension.toLowerCase()))) {
+      if (bytesInspected >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, filename);
+        bytesInspected += bytes;
+        const lines = text.split(/\r?\n/u);
+        for (let li = 0; li < lines.length; li++) {
+          const line = args.caseSensitive ? lines[li]! : lines[li]!.toLowerCase();
+          for (let qi = 0; qi < normalizedQueries.length; qi++) {
+            if (line.includes(normalizedQueries[qi]!)) {
+              const entry = results[args.queries[qi]!]!;
+              if (entry.matches.length < args.limitPerQuery) {
+                entry.matches.push({ path: filename, line: li + 1, text: lines[li]!.slice(0, 1500) });
+              } else { entry.hasMore = true; }
+            }
+          }
+        }
+      } catch { /* skip unreadable */ }
+    }
+    return { results, queriesSearched: args.queries.length, scanTruncated: scan.truncated, bytesInspected };
+  });
+
+  tool('enfusion_file_history', 'List backup versions of a file from .enfusion-mcp/backups/. Shows what previous SHA-256 hashes were saved, allowing recovery of prior edits.', { project, path: relative }, async args => workspace.listBackups(args.project, args.path));
+
+  // ===== RESOURCES & PROMPTS =====
 
   server.registerResource('status', 'enfusion://status', { mimeType: 'application/json', description: 'Configured SDK workspace and capabilities' }, async uri => ({ contents: [{ uri: uri.href, text: JSON.stringify(status()), mimeType: 'application/json' }] }));
   server.registerResource('documentation', 'enfusion://docs', { mimeType: 'application/json', description: 'Official Bohemia documentation catalog' }, async uri => ({ contents: [{ uri: uri.href, text: JSON.stringify(DOCS), mimeType: 'application/json' }] }));

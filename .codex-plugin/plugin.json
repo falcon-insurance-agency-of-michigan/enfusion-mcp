@@ -1,6 +1,6 @@
 {
   "name": "enfusion-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local MCP tools for Enfusion Engine and the Arma Reforger SDK.",
   "author": {
     "name": "s0wingseason",
@@ -9,7 +9,13 @@
   "homepage": "https://github.com/s0wingseason/enfusion-mcp",
   "repository": "https://github.com/s0wingseason/enfusion-mcp",
   "license": "MIT",
-  "keywords": ["enfusion", "arma-reforger", "mcp", "modding", "workbench"],
+  "keywords": [
+    "enfusion",
+    "arma-reforger",
+    "mcp",
+    "modding",
+    "workbench"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Enfusion SDK",
@@ -17,9 +23,16 @@
     "longDescription": "Connect to configured Enfusion projects. Inspect scripts and resources, apply hash-checked edits, create addons and validate script startup in Workbench.",
     "developerName": "s0wingseason",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "websiteURL": "https://github.com/s0wingseason/enfusion-mcp",
-    "defaultPrompt": ["Inspect my Enfusion addon and its dependencies.", "Find the script behind this prefab reference.", "Validate my addon in Arma Reforger Workbench."],
+    "defaultPrompt": [
+      "Inspect my Enfusion addon and its dependencies.",
+      "Find the script behind this prefab reference.",
+      "Validate my addon in Arma Reforger Workbench."
+    ],
     "brandColor": "#70834A"
   },
   "mcpServers": "./.mcp.json"

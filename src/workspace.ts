@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, opendir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Config, Project } from './config.js';
 import { inside } from './config.js';
 
-const readable = new Set(['.c', '.h', '.cpp', '.gproj', '.et', '.ent', '.conf', '.layout', '.meta', '.json', '.txt', '.md', '.xml', '.csv', '.log', '.ini']);
-const writable = new Set(['.c', '.gproj', '.et', '.ent', '.conf', '.layout', '.meta', '.json']);
+const readable = new Set(['.c', '.h', '.cpp', '.gproj', '.et', '.ent', '.conf', '.layout', '.meta', '.json', '.txt', '.md', '.xml', '.csv', '.log', '.ini', '.world', '.layer', '.edds']);
+const writable = new Set(['.c', '.gproj', '.et', '.ent', '.conf', '.layout', '.meta', '.json', '.txt', '.md', '.xml']);
 const ignored = new Set(['node_modules', 'dist', 'build', 'cache', 'logs', 'profile']);
 export const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
 export function isText(filename: string) { return readable.has(path.extname(filename).toLowerCase()); }
@@ -134,4 +134,80 @@ export class Workspace {
     }
     return { path: relative, sha256: sha256(content), bytes: Buffer.byteLength(content), created: !previous, backup };
   }
+
+  async renameFile(id: string, from: string, to: string, expectedSha256: string) {
+    const task = this.mutation.then(() => this.renameUnlocked(id, from, to, expectedSha256));
+    this.mutation = task.catch(() => undefined);
+    return task;
+  }
+
+  private async renameUnlocked(id: string, from: string, to: string, expected: string) {
+    if (!this.project(id).writable) throw new Error('Project is read-only. Set writable in the local configuration to enable edits.');
+    const srcFile = await this.resolve(id, from);
+    const dstFile = await this.resolve(id, to);
+    const current = await this.read(id, from);
+    if (current.sha256 !== expected) throw new Error('Edit conflict: read the current file and supply its sha256 as expectedSha256');
+    // Ensure destination doesn't exist
+    try { await lstat(dstFile); throw new Error('Destination file already exists'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // Backup the original
+    const backupKey = `.enfusion-mcp/backups/${sha256(from.replaceAll('\\', '/'))}/${current.sha256}.bak`;
+    const backupPath = await this.resolve(id, backupKey, true);
+    await mkdir(path.dirname(backupPath), { recursive: true });
+    const original = await readFile(srcFile);
+    await writeFile(backupPath, original, { flag: 'wx' }).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+    // Create destination directory and rename
+    await mkdir(path.dirname(dstFile), { recursive: true });
+    await rename(srcFile, dstFile);
+    return { from, to, sha256: current.sha256, bytes: current.bytes, backup: backupKey };
+  }
+
+  async deleteFile(id: string, relative: string, expectedSha256: string) {
+    const task = this.mutation.then(() => this.deleteUnlocked(id, relative, expectedSha256));
+    this.mutation = task.catch(() => undefined);
+    return task;
+  }
+
+  private async deleteUnlocked(id: string, relative: string, expected: string) {
+    if (!this.project(id).writable) throw new Error('Project is read-only. Set writable in the local configuration to enable edits.');
+    const filename = await this.resolve(id, relative);
+    const current = await this.read(id, relative);
+    if (current.sha256 !== expected) throw new Error('Edit conflict: read the current file and supply its sha256 as expectedSha256');
+    // Backup before deletion
+    const backupKey = `.enfusion-mcp/backups/${sha256(relative.replaceAll('\\', '/'))}/${current.sha256}.bak`;
+    const backupPath = await this.resolve(id, backupKey, true);
+    await mkdir(path.dirname(backupPath), { recursive: true });
+    const original = await readFile(filename);
+    await writeFile(backupPath, original, { flag: 'wx' }).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+    await unlink(filename);
+    return { path: relative, deleted: true, sha256: current.sha256, bytes: current.bytes, backup: backupKey };
+  }
+
+  async listBackups(id: string, relative: string) {
+    const backupDir = `.enfusion-mcp/backups/${sha256(relative.replaceAll('\\', '/'))}`;
+    let dirPath: string;
+    try { dirPath = await this.resolve(id, backupDir, true); }
+    catch { return { path: relative, backups: [], note: 'No backups directory found' }; }
+    const backups: { sha256: string; filename: string }[] = [];
+    try {
+      const entries = await readdir(dirPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.bak')) {
+          const hash = entry.name.slice(0, -4);
+          if (/^[a-f0-9]{64}$/.test(hash)) {
+            backups.push({ sha256: hash, filename: entry.name });
+          }
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path: relative, backups: [], note: 'No backups directory found' };
+      throw error;
+    }
+    return { path: relative, backups, total: backups.length };
+  }
 }
+
