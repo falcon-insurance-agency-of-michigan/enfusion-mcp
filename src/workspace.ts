@@ -209,5 +209,35 @@ export class Workspace {
     }
     return { path: relative, backups, total: backups.length };
   }
+
+  async restoreBackup(id: string, relative: string, backupSha256: string, currentSha256: string) {
+    const task = this.mutation.then(() => this.restoreUnlocked(id, relative, backupSha256, currentSha256));
+    this.mutation = task.catch(() => undefined);
+    return task;
+  }
+
+  private async restoreUnlocked(id: string, relative: string, backupSha256: string, currentSha256: string) {
+    if (!this.project(id).writable) throw new Error('Project is read-only. Set writable in the local configuration to enable edits.');
+    const filename = await this.resolve(id, relative);
+    // Verify current file matches expected SHA-256
+    const current = await this.read(id, relative);
+    if (current.sha256 !== currentSha256) throw new Error('Edit conflict: read the current file and supply its sha256 as currentSha256');
+    // Find the backup
+    const backupKey = `.enfusion-mcp/backups/${sha256(relative.replaceAll('\\', '/'))}/${backupSha256}.bak`;
+    const backupPath = await this.resolve(id, backupKey, true);
+    let backupContent: Buffer;
+    try { backupContent = await readFile(backupPath); }
+    catch { throw new Error(`Backup not found: ${backupSha256}. Use enfusion_file_history to list available backups.`); }
+    // Backup the current version before restoring
+    const newBackupKey = `.enfusion-mcp/backups/${sha256(relative.replaceAll('\\', '/'))}/${current.sha256}.bak`;
+    const newBackupPath = await this.resolve(id, newBackupKey, true);
+    await mkdir(path.dirname(newBackupPath), { recursive: true });
+    await writeFile(newBackupPath, await readFile(filename), { flag: 'wx' }).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+    // Write the restored content
+    await writeFile(filename, backupContent);
+    return { path: relative, restoredFromSha256: backupSha256, newSha256: sha256(backupContent), bytes: backupContent.length, previousSha256: current.sha256 };
+  }
 }
 

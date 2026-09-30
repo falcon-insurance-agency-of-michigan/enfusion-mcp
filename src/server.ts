@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from './config.js';
 import { VERSION } from './config.js';
 import { Workspace, isText } from './workspace.js';
-import { DOCS, SCRIPT_TEMPLATES, buildClassHierarchy, buildDependencyGraph, computeFileStats, configInfo, extractStrings, layoutInfo, metaInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptFunctions, scriptSymbols, worldInfo } from './analysis.js';
+import { DOCS, SCRIPT_TEMPLATES, buildClassHierarchy, buildDependencyGraph, computeFileStats, configInfo, detectDuplicateClasses, extractStrings, findSymbolReferences, findUnusedResources, layoutInfo, metaInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptComplexity, scriptFunctions, scriptSymbols, serverConfigInfo, todoScan, worldInfo } from './analysis.js';
 import { Workbench } from './workbench.js';
 
 const project = z.string().min(1).max(64).describe('Configured project id from enfusion_status');
@@ -386,6 +386,160 @@ export function createServer(config: Config): McpServer {
       } catch { /* skip */ }
     }
     return { className: args.className, implementations: results, total: results.length, bytesInspected: bytesRead, scanTruncated: scan.truncated };
+  });
+
+  // ===== NEW TOOLS (v0.4.0) =====
+
+  tool('enfusion_todo_scan', 'Find all TODO, FIXME, HACK, NOTE, BUG, XXX, and WORKAROUND annotations across project script files. Returns tag, message, file, and line number.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => isText(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const items = todoScan(files);
+    const bySeverity: Record<string, number> = {};
+    for (const item of items) bySeverity[item.tag] = (bySeverity[item.tag] ?? 0) + 1;
+    return { items, summary: bySeverity, total: items.length, filesScanned: files.length };
+  });
+
+  tool('enfusion_find_references', 'Find all usages of a symbol (class name, function name, variable) across all project text files. Distinguishes declarations from usages.', { project, symbol: z.string().min(1).max(128) }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => isText(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const refs = findSymbolReferences(files, args.symbol);
+    return { symbol: args.symbol, references: refs, total: refs.length, declarations: refs.filter(r => r.kind === 'declaration').length, usages: refs.filter(r => r.kind === 'usage').length };
+  });
+
+  tool('enfusion_duplicate_classes', 'Detect duplicate class declarations across the project. Flags classes with multiple non-modded declarations in different files — a common source of compile errors.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const duplicates = detectDuplicateClasses(files);
+    return { duplicates, total: duplicates.length, filesScanned: files.length };
+  });
+
+  tool('enfusion_unused_resources', 'Find .meta-registered resources whose GUIDs are never referenced in any project file. These may be orphaned/unused assets.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    // Build meta ownership map
+    const metaOwnership = new Map<string, { resource: string; name: string; file: string }>();
+    for (const f of scan.files.filter(f => /\.meta$/iu.test(f))) {
+      try {
+        const { text } = await workspace.read(args.project, f);
+        const mi = metaInfo(text);
+        if (mi.guid) metaOwnership.set(mi.guid, { resource: f.slice(0, -5), name: mi.resourceName ?? '', file: f });
+      } catch { /* skip */ }
+    }
+    // Collect all referenced GUIDs
+    const referencedGuids = new Set<string>();
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => isText(f) && !f.endsWith('.meta'))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, f);
+        bytesRead += bytes;
+        for (const ref of resourceReferences(text)) referencedGuids.add(ref.guid);
+      } catch { /* skip */ }
+    }
+    const unused = findUnusedResources(metaOwnership, referencedGuids);
+    return { unused, total: unused.length, metaFilesScanned: metaOwnership.size, contentFilesScanned: scan.files.length - metaOwnership.size, scope: 'This project only; some resources may be referenced from engine or other mods' };
+  });
+
+  tool('enfusion_script_complexity', 'Analyze function complexity across project .c files: line count, max nesting depth, parameter count. Sorted by line count descending. Useful for identifying functions that need refactoring.', { project, minLines: z.number().int().min(1).default(10) }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const all = scriptComplexity(files);
+    const filtered = all.filter(f => f.lineCount >= args.minLines);
+    return { functions: filtered, total: filtered.length, totalFunctions: all.length, filesScanned: files.length };
+  });
+
+  tool('enfusion_server_config', 'Parse an Arma Reforger server configuration JSON file: extract scenario, max players, server name, mod list, and port bindings.', { project, path: relative }, async args => {
+    if (path.extname(args.path).toLowerCase() !== '.json') throw new Error('Expected a .json server configuration file');
+    const { text } = await workspace.read(args.project, args.path);
+    return { path: args.path, ...serverConfigInfo(text) };
+  });
+
+  tool('enfusion_restore_backup', 'Restore a file from a previously saved backup version. Requires the backup SHA-256 (from enfusion_file_history) and the current file SHA-256 to prevent conflicts. The current version is backed up before restoration.', { project, path: relative, backupSha256: z.string().regex(/^[a-f0-9]{64}$/), currentSha256: z.string().regex(/^[a-f0-9]{64}$/) }, async args => {
+    return workspace.restoreBackup(args.project, args.path, args.backupSha256, args.currentSha256);
+  }, false);
+
+  tool('enfusion_grep_context', 'Search for a literal string in project files and return matching lines WITH surrounding context lines (like grep -C). Use when you need to see what is around a match.', { project, query: z.string().min(1).max(512), contextLines: z.number().int().min(0).max(10).default(3), extension: z.string().regex(/^\.[a-zA-Z0-9]+$/).optional(), limit }, async args => {
+    const scan = await workspace.list(args.project);
+    const matches: { path: string; line: number; before: string[]; match: string; after: string[] }[] = [];
+    let bytesInspected = 0;
+    const queryLower = args.query.toLowerCase();
+    for (const f of scan.files.filter(f => isText(f) && (!args.extension || path.extname(f).toLowerCase() === args.extension.toLowerCase()))) {
+      if (bytesInspected >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, f);
+        bytesInspected += bytes;
+        const lines = text.split(/\r?\n/u);
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i]!.toLowerCase().includes(queryLower)) {
+            const before = lines.slice(Math.max(0, i - args.contextLines), i).map(l => l.slice(0, 1500));
+            const after = lines.slice(i + 1, i + 1 + args.contextLines).map(l => l.slice(0, 1500));
+            matches.push({ path: f, line: i + 1, before, match: lines[i]!.slice(0, 1500), after });
+            if (matches.length >= args.limit) break;
+          }
+        }
+        if (matches.length >= args.limit) break;
+      } catch { /* skip */ }
+    }
+    return { query: args.query, matches, hasMore: matches.length >= args.limit, bytesInspected };
+  });
+
+  tool('enfusion_rename_symbol', 'Preview renaming a symbol (class, function, variable) across all project text files. Returns the list of replacements that WOULD be made. Does NOT modify files — review the preview and use enfusion_write_file for each change.', { project, oldName: z.string().min(1).max(128), newName: z.string().min(1).max(128) }, async args => {
+    if (args.oldName === args.newName) throw new Error('Old and new names are identical');
+    const scan = await workspace.list(args.project);
+    const replacements: { file: string; line: number; before: string; after: string }[] = [];
+    let bytesRead = 0;
+    const escaped = args.oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'g');
+    for (const f of scan.files.filter(f => isText(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, bytes } = await workspace.read(args.project, f);
+        bytesRead += bytes;
+        const lines = text.split(/\r?\n/u);
+        for (let i = 0; i < lines.length; i++) {
+          if (re.test(lines[i]!)) {
+            re.lastIndex = 0;
+            const after = lines[i]!.replace(re, args.newName);
+            if (after !== lines[i]) replacements.push({ file: f, line: i + 1, before: lines[i]!.slice(0, 500), after: after.slice(0, 500) });
+          }
+        }
+      } catch { /* skip */ }
+    }
+    return { oldName: args.oldName, newName: args.newName, replacements, totalReplacements: replacements.length, note: 'This is a DRY-RUN preview. Apply changes with enfusion_write_file.' };
+  });
+
+  tool('enfusion_entity_count', 'Count and summarize entity types in a prefab or world file. Reports how many of each entity class are present — useful for performance auditing.', { project, path: relative }, async args => {
+    const ext = path.extname(args.path).toLowerCase();
+    if (ext !== '.et' && ext !== '.ent') throw new Error('Expected a .et prefab or .ent world file');
+    const { text } = await workspace.read(args.project, args.path);
+    const clean = text.replace(/\/\/[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const entities: Record<string, number> = {};
+    for (const m of clean.matchAll(/\b(\w+)\s*(?::\s*"[^"]*")?\s*\{/g)) {
+      const name = m[1]!;
+      if (!/^(if|else|for|while|switch)$/.test(name)) entities[name] = (entities[name] ?? 0) + 1;
+    }
+    const sorted = Object.entries(entities).sort(([, a], [, b]) => b - a);
+    const total = sorted.reduce((sum, [, count]) => sum + count, 0);
+    return { path: args.path, entityTypes: Object.fromEntries(sorted), uniqueTypes: sorted.length, totalEntities: total };
   });
 
   // ===== RESOURCES & PROMPTS =====

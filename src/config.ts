@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { z } from 'zod';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 const rootPath = z.string().min(1).refine(path.isAbsolute, 'Use an absolute filesystem path');
 const schema = z.object({
   projects: z.array(z.object({

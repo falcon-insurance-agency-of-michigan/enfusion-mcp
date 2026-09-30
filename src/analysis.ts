@@ -427,6 +427,144 @@ class {{CLASS_NAME}} : WorkbenchPlugin
   },
 };
 
+export type TodoItem = { tag: string; message: string; file: string; line: number };
+
+export function todoScan(files: { path: string; text: string }[]): TodoItem[] {
+  const results: TodoItem[] = [];
+  const re = /\b(TODO|FIXME|HACK|NOTE|BUG|XXX|WORKAROUND)\b[:\s]*(.*)/gi;
+  for (const file of files) {
+    const lines = file.text.split(/\r?\n/u);
+    for (let i = 0; i < lines.length; i++) {
+      for (const m of lines[i]!.matchAll(re)) {
+        results.push({ tag: m[1]!.toUpperCase(), message: m[2]!.trim().slice(0, 500), file: file.path, line: i + 1 });
+      }
+    }
+  }
+  return results.slice(0, 1000);
+}
+
+export type SymbolRef = { file: string; line: number; context: string; kind: 'declaration' | 'usage' };
+
+export function findSymbolReferences(files: { path: string; text: string }[], symbol: string): SymbolRef[] {
+  const results: SymbolRef[] = [];
+  const escapedSymbol = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\b${escapedSymbol}\\b`, 'g');
+  for (const file of files) {
+    const clean = maskComments(file.text, true);
+    const lines = clean.split(/\r?\n/u);
+    const origLines = file.text.split(/\r?\n/u);
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i]!)) {
+        re.lastIndex = 0;
+        // Determine if this is a declaration or usage
+        const isDecl = /(?:class|enum)\s+/.test(lines[i]!.slice(0, lines[i]!.indexOf(symbol))) ||
+          new RegExp(`\\b\\w+\\s+${escapedSymbol}\\s*\\(`).test(lines[i]!);
+        results.push({ file: file.path, line: i + 1, context: origLines[i]!.trim().slice(0, 300), kind: isDecl ? 'declaration' : 'usage' });
+      }
+    }
+  }
+  return results.slice(0, 1000);
+}
+
+export type DuplicateGroup = { name: string; occurrences: { file: string; line: number; modded: boolean }[] };
+
+export function detectDuplicateClasses(files: { path: string; text: string }[]): DuplicateGroup[] {
+  const classMap = new Map<string, { file: string; line: number; modded: boolean }[]>();
+  for (const file of files) {
+    for (const sym of scriptSymbols(file.text)) {
+      if (sym.kind === 'class') {
+        const key = sym.name!;
+        if (!classMap.has(key)) classMap.set(key, []);
+        classMap.get(key)!.push({ file: file.path, line: sym.line, modded: sym.modded });
+      }
+    }
+  }
+  const duplicates: DuplicateGroup[] = [];
+  for (const [name, occs] of classMap) {
+    // Only flag as duplicate if there are multiple non-modded declarations, or multiple declarations total
+    const nonModded = occs.filter(o => !o.modded);
+    if (nonModded.length > 1 || occs.length > 2) {
+      duplicates.push({ name, occurrences: occs });
+    }
+  }
+  return duplicates.slice(0, 200);
+}
+
+export type UnusedResource = { metaFile: string; guid: string; resourceName: string };
+
+export function findUnusedResources(
+  metaOwnership: Map<string, { resource: string; name: string; file: string }>,
+  referencedGuids: Set<string>
+): UnusedResource[] {
+  const unused: UnusedResource[] = [];
+  for (const [guid, info] of metaOwnership) {
+    if (!referencedGuids.has(guid)) {
+      unused.push({ metaFile: info.file, guid, resourceName: info.name });
+    }
+  }
+  return unused.slice(0, 500);
+}
+
+export type FunctionComplexity = { name: string; className: string | null; file: string; line: number; lineCount: number; maxNestingDepth: number; paramCount: number };
+
+export function scriptComplexity(files: { path: string; text: string }[]): FunctionComplexity[] {
+  const results: FunctionComplexity[] = [];
+  for (const file of files) {
+    const funcs = scriptFunctions(file.text);
+    const lines = file.text.split(/\r?\n/u);
+    for (const func of funcs) {
+      // Estimate function body by counting lines until brace depth returns to 0
+      let depth = 0, started = false, lineCount = 0, maxDepth = 0;
+      for (let i = func.line - 1; i < lines.length && lineCount < 500; i++) {
+        const line = lines[i]!;
+        for (const ch of line) {
+          if (ch === '{') { depth++; started = true; }
+          if (ch === '}') depth--;
+        }
+        if (started) {
+          lineCount++;
+          if (depth > maxDepth) maxDepth = depth;
+          if (depth <= 0) break;
+        }
+      }
+      const paramCount = func.params ? func.params.split(',').filter(p => p.trim()).length : 0;
+      results.push({ name: func.name, className: func.className, file: file.path, line: func.line, lineCount, maxNestingDepth: maxDepth, paramCount });
+    }
+  }
+  return results.sort((a, b) => b.lineCount - a.lineCount).slice(0, 500);
+}
+
+export type ServerConfigInfo = { scenarioId: string | null; maxPlayers: number | null; name: string | null; mods: { modId: string; name: string }[]; ports: Record<string, number>; warnings: string[] };
+
+export function serverConfigInfo(text: string): ServerConfigInfo {
+  const warnings: string[] = [];
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(text); }
+  catch { throw new Error('Invalid JSON: not a valid server configuration file'); }
+  const game = (parsed as any).game ?? (parsed as any).Game ?? {};
+  const scenarioId = game.scenarioId ?? game.ScenarioId ?? null;
+  const maxPlayers = game.maxPlayers ?? game.MaxPlayers ?? (parsed as any).maxPlayers ?? null;
+  const name = game.name ?? game.Name ?? (parsed as any).serverName ?? (parsed as any).name ?? null;
+  const mods: { modId: string; name: string }[] = [];
+  const modList = game.mods ?? (parsed as any).mods ?? [];
+  if (Array.isArray(modList)) {
+    for (const m of modList) {
+      if (m && typeof m === 'object') {
+        mods.push({ modId: m.modId ?? m.id ?? '', name: m.name ?? '' });
+      }
+    }
+  }
+  const ports: Record<string, number> = {};
+  // Standard Reforger server ports
+  for (const key of ['bindPort', 'publicPort', 'a2sPort', 'rconPort', 'steamQueryPort']) {
+    const val = (parsed as any)[key] ?? game[key];
+    if (typeof val === 'number') ports[key] = val;
+  }
+  if (!scenarioId) warnings.push('No scenarioId found');
+  if (!name) warnings.push('No server name found');
+  return { scenarioId, maxPlayers, name, mods, ports, warnings };
+}
+
 export const DOCS = [
   { title: 'Mod project setup', topics: 'project gproj dependencies steam install', url: 'https://community.bistudio.com/wiki/Arma_Reforger:Mod_Project_Setup' },
   { title: 'Workbench startup parameters', topics: 'cli launch module plugin profile logs build', url: 'https://community.bistudio.com/wiki/Arma_Reforger:Startup_Parameters' },
