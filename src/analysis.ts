@@ -565,6 +565,192 @@ export function serverConfigInfo(text: string): ServerConfigInfo {
   return { scenarioId, maxPlayers, name, mods, ports, warnings };
 }
 
+// ===== v0.5.0 analysis functions =====
+
+export type LintIssue = { rule: string; severity: 'error' | 'warning' | 'info'; message: string; file: string; line: number };
+
+export function lintScript(files: { path: string; text: string }[]): LintIssue[] {
+  const issues: LintIssue[] = [];
+  for (const file of files) {
+    const lines = file.text.split(/\r?\n/u);
+    const clean = maskComments(file.text, true);
+    const cleanLines = clean.split(/\r?\n/u);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const cline = cleanLines[i]!;
+      // Empty catch blocks
+      if (/catch\s*\([^)]*\)\s*\{\s*\}/.test(cline)) {
+        issues.push({ rule: 'no-empty-catch', severity: 'warning', message: 'Empty catch block swallows errors', file: file.path, line: i + 1 });
+      }
+      // override without super call (heuristic: check next 10 lines for super)
+      if (/\boverride\b.*\b(\w+)\s*\(/.test(cline)) {
+        const funcName = /\boverride\b.*\b(\w+)\s*\(/.exec(cline)?.[1];
+        if (funcName) {
+          const nextLines = cleanLines.slice(i + 1, i + 15).join('\n');
+          if (!nextLines.includes(`super.${funcName}(`) && !nextLines.includes(`super.${funcName} (`)) {
+            issues.push({ rule: 'missing-super', severity: 'warning', message: `Override '${funcName}' may be missing super.${funcName}() call`, file: file.path, line: i + 1 });
+          }
+        }
+      }
+      // Print() left in code (common debug leftover)
+      if (/\bPrint\s*\(/.test(cline) && !/\/\//.test(line.slice(0, line.indexOf('Print')))) {
+        issues.push({ rule: 'no-print', severity: 'info', message: 'Print() call found — may be debug leftover', file: file.path, line: i + 1 });
+      }
+      // Magic numbers in comparisons (skip 0, 1, -1, 2)
+      if (/[<>=!]=?\s*(\d{3,})/.test(cline)) {
+        const num = /[<>=!]=?\s*(\d{3,})/.exec(cline)?.[1];
+        issues.push({ rule: 'magic-number', severity: 'info', message: `Magic number ${num} — consider a named constant`, file: file.path, line: i + 1 });
+      }
+      // Very long lines (>200 chars)
+      if (line.length > 200) {
+        issues.push({ rule: 'long-line', severity: 'info', message: `Line is ${line.length} chars (>200)`, file: file.path, line: i + 1 });
+      }
+    }
+    // Class naming: non-modded classes should start with uppercase
+    for (const sym of scriptSymbols(file.text)) {
+      if (sym.kind === 'class' && !sym.modded && sym.name && /^[a-z]/.test(sym.name)) {
+        issues.push({ rule: 'class-naming', severity: 'warning', message: `Class '${sym.name}' should start with uppercase`, file: file.path, line: sym.line });
+      }
+    }
+  }
+  return issues.sort((a, b) => a.severity === 'error' ? -1 : b.severity === 'error' ? 1 : 0).slice(0, 1000);
+}
+
+export type DeadCodeItem = { kind: 'class' | 'function'; name: string; file: string; line: number; className?: string };
+
+export function findDeadCode(files: { path: string; text: string }[]): DeadCodeItem[] {
+  // Collect all declared symbols
+  const declared: DeadCodeItem[] = [];
+  const allText = files.map(f => maskComments(f.text, true)).join('\n');
+  for (const file of files) {
+    for (const sym of scriptSymbols(file.text)) {
+      if (sym.kind === 'class' && !sym.modded && sym.name) {
+        declared.push({ kind: 'class', name: sym.name, file: file.path, line: sym.line });
+      }
+    }
+    for (const func of scriptFunctions(file.text)) {
+      // Skip common lifecycle methods that are called by the engine
+      if (/^(On|E[Oo]n|Get|Set|Can|Is|Has|Init|EOnFrame|EOnInit|OnPostInit|OnDelete|PerformAction)/.test(func.name)) continue;
+      if (func.modifiers.includes('override') || func.modifiers.includes('event')) continue;
+      declared.push({ kind: 'function', name: func.name, file: file.path, line: func.line, className: func.className ?? undefined });
+    }
+  }
+  // Check which are never referenced outside their declaration line
+  const dead: DeadCodeItem[] = [];
+  for (const item of declared) {
+    const escaped = item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'g');
+    const matches = [...allText.matchAll(re)];
+    // If only referenced once (the declaration itself), it's dead
+    if (matches.length <= 1) dead.push(item);
+  }
+  return dead.slice(0, 500);
+}
+
+export type ApiEntry = { kind: 'class' | 'enum' | 'function'; name: string; base?: string; modded?: boolean; returnType?: string; params?: string; modifiers?: string[]; className?: string; line: number };
+
+export function generateApiDoc(files: { path: string; text: string }[]): { entries: ApiEntry[]; markdown: string } {
+  const entries: ApiEntry[] = [];
+  for (const file of files) {
+    for (const sym of scriptSymbols(file.text)) {
+      entries.push({ kind: sym.kind as 'class' | 'enum', name: sym.name!, base: sym.base ?? undefined, modded: sym.modded || undefined, line: sym.line });
+    }
+    for (const func of scriptFunctions(file.text)) {
+      entries.push({ kind: 'function', name: func.name, returnType: func.returnType ?? undefined, params: func.params || undefined, modifiers: func.modifiers.length ? func.modifiers : undefined, className: func.className ?? undefined, line: func.line });
+    }
+  }
+  // Generate markdown
+  const lines: string[] = ['# API Reference', ''];
+  const classes = entries.filter(e => e.kind === 'class');
+  const enums = entries.filter(e => e.kind === 'enum');
+  const functions = entries.filter(e => e.kind === 'function');
+  if (classes.length) {
+    lines.push('## Classes', '');
+    for (const c of classes) {
+      const ext = c.base ? ` : ${c.base}` : '';
+      const mod = c.modded ? 'modded ' : '';
+      lines.push(`### ${mod}class ${c.name}${ext}`, '');
+      const methods = functions.filter(f => f.className === c.name);
+      if (methods.length) {
+        lines.push('| Method | Returns | Parameters |', '|--------|---------|------------|');
+        for (const m of methods) lines.push(`| ${(m.modifiers ?? []).join(' ')} **${m.name}** | ${m.returnType ?? 'void'} | ${m.params ?? ''} |`);
+        lines.push('');
+      }
+    }
+  }
+  if (enums.length) {
+    lines.push('## Enums', '');
+    for (const e of enums) lines.push(`- \`${e.name}\``);
+    lines.push('');
+  }
+  const freeFunctions = functions.filter(f => !f.className);
+  if (freeFunctions.length) {
+    lines.push('## Free Functions', '', '| Function | Returns | Parameters |', '|----------|---------|------------|');
+    for (const f of freeFunctions) lines.push(`| **${f.name}** | ${f.returnType ?? 'void'} | ${f.params ?? ''} |`);
+    lines.push('');
+  }
+  return { entries: entries.slice(0, 1000), markdown: lines.join('\n') };
+}
+
+export type ModdedOverride = { name: string; file: string; line: number; methods: string[] };
+
+export function findModdedOverrides(files: { path: string; text: string }[]): ModdedOverride[] {
+  const results: ModdedOverride[] = [];
+  for (const file of files) {
+    for (const sym of scriptSymbols(file.text)) {
+      if (sym.kind === 'class' && sym.modded && sym.name) {
+        const methods = scriptFunctions(file.text).filter(f => f.className === sym.name).map(f => f.name);
+        results.push({ name: sym.name, file: file.path, line: sym.line, methods });
+      }
+    }
+  }
+  return results.slice(0, 500);
+}
+
+export type PrefabNode = { className: string | null; parentPrefab: string | null; file: string; children: string[] };
+
+export function buildPrefabTree(files: { path: string; text: string }[]): { nodes: PrefabNode[]; roots: string[]; stats: { total: number; withParent: number; orphans: number } } {
+  const nodes: PrefabNode[] = [];
+  const parentMap = new Map<string, string>(); // file -> parent prefab path
+  for (const file of files) {
+    const info = prefabInfo(file.text);
+    parentMap.set(file.path, info.parentPrefab ?? '');
+    nodes.push({ className: info.className, parentPrefab: info.parentPrefab, file: file.path, children: [] });
+  }
+  // Link children
+  for (const node of nodes) {
+    if (node.parentPrefab) {
+      const parent = nodes.find(n => n.file === node.parentPrefab || n.file.endsWith(node.parentPrefab!));
+      if (parent) parent.children.push(node.file);
+    }
+  }
+  const withParent = nodes.filter(n => n.parentPrefab).length;
+  const roots = nodes.filter(n => !n.parentPrefab).map(n => n.file);
+  return { nodes: nodes.slice(0, 500), roots, stats: { total: nodes.length, withParent, orphans: nodes.filter(n => n.parentPrefab && !nodes.find(p => p.file === n.parentPrefab || p.file.endsWith(n.parentPrefab!))).length } };
+}
+
+export type FileSummary = { file: string; type: string; classes: string[]; functions: number; entities: number; components: number; references: number; lineCount: number };
+
+export function summarizeFile(filename: string, text: string): FileSummary {
+  const ext = path.extname(filename).toLowerCase();
+  const lineCount = text.split(/\r?\n/u).length;
+  const syms = scriptSymbols(text);
+  const classes = syms.filter(s => s.kind === 'class').map(s => s.name!);
+  const functions = scriptFunctions(text).length;
+  const refs = resourceReferences(text);
+  let type = 'unknown';
+  let entities = 0, components = 0;
+  if (ext === '.c' || ext === '.h') type = 'script';
+  else if (ext === '.et') { type = 'prefab'; const pi = prefabInfo(text); entities = pi.entityCount; components = pi.components.length; }
+  else if (ext === '.ent') { type = 'world'; const wi = worldInfo(text); entities = wi.totalEntities; }
+  else if (ext === '.layout') { type = 'layout'; const li = layoutInfo(text); components = li.widgets.length; }
+  else if (ext === '.conf') type = 'config';
+  else if (ext === '.meta') type = 'meta';
+  else if (ext === '.gproj') type = 'project';
+  else if (ext === '.json') type = 'json';
+  return { file: filename, type, classes, functions, entities, components, references: refs.length, lineCount };
+}
+
 export const DOCS = [
   { title: 'Mod project setup', topics: 'project gproj dependencies steam install', url: 'https://community.bistudio.com/wiki/Arma_Reforger:Mod_Project_Setup' },
   { title: 'Workbench startup parameters', topics: 'cli launch module plugin profile logs build', url: 'https://community.bistudio.com/wiki/Arma_Reforger:Startup_Parameters' },

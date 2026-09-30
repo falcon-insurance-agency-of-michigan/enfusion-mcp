@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from './config.js';
 import { VERSION } from './config.js';
 import { Workspace, isText } from './workspace.js';
-import { DOCS, SCRIPT_TEMPLATES, buildClassHierarchy, buildDependencyGraph, computeFileStats, configInfo, detectDuplicateClasses, extractStrings, findSymbolReferences, findUnusedResources, layoutInfo, metaInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptComplexity, scriptFunctions, scriptSymbols, serverConfigInfo, todoScan, worldInfo } from './analysis.js';
+import { DOCS, SCRIPT_TEMPLATES, buildClassHierarchy, buildDependencyGraph, buildPrefabTree, computeFileStats, configInfo, detectDuplicateClasses, extractStrings, findDeadCode, findModdedOverrides, findSymbolReferences, findUnusedResources, generateApiDoc, layoutInfo, lintScript, metaInfo, parseDiagnostics, prefabInfo, projectInfo, resourceReferences, scriptComplexity, scriptFunctions, scriptSymbols, serverConfigInfo, summarizeFile, todoScan, worldInfo } from './analysis.js';
 import { Workbench } from './workbench.js';
 
 const project = z.string().min(1).max(64).describe('Configured project id from enfusion_status');
@@ -540,6 +540,156 @@ export function createServer(config: Config): McpServer {
     const sorted = Object.entries(entities).sort(([, a], [, b]) => b - a);
     const total = sorted.reduce((sum, [, count]) => sum + count, 0);
     return { path: args.path, entityTypes: Object.fromEntries(sorted), uniqueTypes: sorted.length, totalEntities: total };
+  });
+
+  // ===== NEW TOOLS (v0.5.0) =====
+
+  tool('enfusion_lint_script', 'Basic linter for Enforce Script: checks empty catch blocks, missing super calls in overrides, Print() debug leftovers, magic numbers, long lines, and class naming conventions.', { project, path: z.string().max(1024).optional() }, async args => {
+    const scan = await workspace.list(args.project);
+    const targetFiles = scan.files.filter(f => /\.c$/iu.test(f) && (!args.path || f === args.path));
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of targetFiles) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const issues = lintScript(files);
+    const summary: Record<string, number> = {};
+    for (const iss of issues) summary[iss.rule] = (summary[iss.rule] ?? 0) + 1;
+    return { issues, summary, total: issues.length, filesScanned: files.length, errors: issues.filter(i => i.severity === 'error').length, warnings: issues.filter(i => i.severity === 'warning').length, info: issues.filter(i => i.severity === 'info').length };
+  });
+
+  tool('enfusion_dead_code', 'Find potentially unused classes and functions — declared but never referenced elsewhere in the project. Engine lifecycle methods (OnInit, EOnFrame, etc.) and overrides/events are excluded.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const items = findDeadCode(files);
+    return { items, total: items.length, deadClasses: items.filter(i => i.kind === 'class').length, deadFunctions: items.filter(i => i.kind === 'function').length, filesScanned: files.length, note: 'Engine callbacks and lifecycle methods are excluded. Some items may be referenced by other mods or engine internals.' };
+  });
+
+  tool('enfusion_api_doc', 'Generate API documentation (markdown) from all classes, enums, and functions in the project. Returns structured entries and rendered markdown.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const doc = generateApiDoc(files);
+    return { ...doc, totalEntries: doc.entries.length, filesScanned: files.length };
+  });
+
+  tool('enfusion_modded_overrides', 'Find all modded class declarations in the project: which classes are being overridden, in which files, and what methods they add/override.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.c$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    const overrides = findModdedOverrides(files);
+    return { overrides, total: overrides.length, filesScanned: files.length };
+  });
+
+  tool('enfusion_prefab_tree', 'Build the prefab inheritance tree across all .et files in the project. Shows parent-child relationships, root prefabs, and orphaned references.', { project }, async args => {
+    const scan = await workspace.list(args.project);
+    const files: { path: string; text: string }[] = [];
+    let bytesRead = 0;
+    for (const f of scan.files.filter(f => /\.et$/iu.test(f))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try { const r = await workspace.read(args.project, f); bytesRead += r.bytes; files.push({ path: f, text: r.text }); } catch { /* skip */ }
+    }
+    return buildPrefabTree(files);
+  });
+
+  tool('enfusion_summarize', 'Get a quick summary of what a file contains: type, classes, function count, entity/component count, resource references, and line count.', { project, path: relative }, async args => {
+    const { text } = await workspace.read(args.project, args.path);
+    return summarizeFile(args.path, text);
+  });
+
+  tool('enfusion_bulk_replace', 'Apply a text replacement across all project files that match. Modifies files in-place (with backup). Use enfusion_rename_symbol first for a dry-run preview.', { project, oldText: z.string().min(1).max(512), newText: z.string().max(512), extension: z.string().regex(/^\.[a-zA-Z0-9]+$/).optional() }, async args => {
+    const scan = await workspace.list(args.project);
+    const affected: { file: string; replacements: number }[] = [];
+    let bytesRead = 0, totalReplacements = 0;
+    for (const f of scan.files.filter(f => isText(f) && (!args.extension || path.extname(f).toLowerCase() === args.extension.toLowerCase()))) {
+      if (bytesRead >= 32 * 1024 * 1024) break;
+      try {
+        const { text, sha256, bytes } = await workspace.read(args.project, f);
+        bytesRead += bytes;
+        if (!text.includes(args.oldText)) continue;
+        const newContent = text.replaceAll(args.oldText, args.newText);
+        const count = (text.split(args.oldText).length - 1);
+        await workspace.write(args.project, f, newContent, sha256);
+        affected.push({ file: f, replacements: count });
+        totalReplacements += count;
+      } catch { /* skip on conflict */ }
+    }
+    return { oldText: args.oldText, newText: args.newText, affectedFiles: affected, totalFiles: affected.length, totalReplacements };
+  }, false);
+
+  tool('enfusion_git_status', 'Show git status and recent commits for a project directory. Requires git to be installed.', { project }, async args => {
+    const proj = workspace.project(args.project);
+    const { exec } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execAsync = promisify(exec);
+    const root = proj.root;
+    try {
+      await execAsync('git rev-parse --is-inside-work-tree', { cwd: root, timeout: 5000 });
+      const [status, log, branch] = await Promise.all([
+        execAsync('git status --porcelain', { cwd: root, timeout: 5000 }).then(r => r.stdout.trim()).catch(() => ''),
+        execAsync('git log --oneline -10', { cwd: root, timeout: 5000 }).then(r => r.stdout.trim()).catch(() => ''),
+        execAsync('git branch --show-current', { cwd: root, timeout: 5000 }).then(r => r.stdout.trim()).catch(() => 'unknown'),
+      ]);
+      const changes = status ? status.split('\n').map(l => ({ status: l.slice(0, 2).trim(), file: l.slice(3) })) : [];
+      const commits = log ? log.split('\n').map(l => ({ hash: l.slice(0, 7), message: l.slice(8) })) : [];
+      return { project: args.project, root, branch, changes, changedFileCount: changes.length, recentCommits: commits, isGitRepo: true };
+    } catch {
+      return { project: args.project, root, isGitRepo: false, note: 'Not a git repository or git not available' };
+    }
+  });
+
+  tool('enfusion_config_template', 'Generate a server configuration JSON template for Arma Reforger with common defaults filled in. Optionally customize server name, scenario, max players, and mod list.', { name: z.string().max(128).default('My Reforger Server'), scenarioId: z.string().max(256).default('{ECC61978EDCC2B5A}Missions/23_Campaign.conf'), maxPlayers: z.number().int().min(1).max(256).default(64), bindPort: z.number().int().default(2001), mods: z.array(z.object({ modId: z.string(), name: z.string() })).default([]) }, async args => {
+    const config = {
+      bindAddress: "0.0.0.0",
+      bindPort: args.bindPort,
+      publicAddress: "",
+      publicPort: args.bindPort,
+      a2s: { address: "0.0.0.0", port: args.bindPort + 16 },
+      rcon: { address: "0.0.0.0", port: args.bindPort + 1, password: "CHANGE_ME" },
+      game: {
+        name: args.name,
+        scenarioId: args.scenarioId,
+        maxPlayers: args.maxPlayers,
+        visible: true,
+        crossPlatform: true,
+        supportedPlatforms: ["PLATFORM_PC", "PLATFORM_XBL"],
+        gameProperties: { serverMaxViewDistance: 2500, serverMinGrassDistance: 50, networkViewDistance: 1000, disableThirdPerson: false, fastValidation: true, VONDisableUI: false, VONDisableDirectSpeechUI: false },
+        mods: args.mods
+      },
+      operating: { lobbyPlayerSynchronise: true }
+    };
+    return { config, json: JSON.stringify(config, null, 2), note: 'Change the RCON password before use. Set publicAddress to your external IP/hostname.' };
+  });
+
+  tool('enfusion_file_outline', 'Get a structured outline of a file: top-level declarations (classes, enums, functions) with line numbers. Like an IDE\'s outline/symbol view.', { project, path: relative }, async args => {
+    const { text, sha256 } = await workspace.read(args.project, args.path);
+    const symbols = scriptSymbols(text);
+    const functions = scriptFunctions(text);
+    const outline: { kind: string; name: string; line: number; detail?: string }[] = [];
+    for (const sym of symbols) {
+      if (!sym.kind || !sym.name) continue;
+      const detail = sym.kind === 'class' ? (sym.modded ? `modded, extends ${sym.base ?? 'unknown'}` : sym.base ? `extends ${sym.base}` : undefined) : undefined;
+      outline.push({ kind: sym.kind, name: sym.name, line: sym.line, detail });
+    }
+    for (const func of functions) {
+      outline.push({ kind: 'function', name: func.name, line: func.line, detail: `${func.returnType}(${func.params})${func.className ? ` in ${func.className}` : ''}` });
+    }
+    outline.sort((a, b) => a.line - b.line);
+    return { path: args.path, sha256, outline, totalSymbols: outline.length };
   });
 
   // ===== RESOURCES & PROMPTS =====

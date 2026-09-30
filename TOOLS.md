@@ -1,6 +1,6 @@
 # Enfusion MCP — Tool Reference & Roadmap
 
-> **Version 0.4.0** · Local MCP server for Enfusion Engine / Arma Reforger SDK
+> **Version 0.5.0** · Local MCP server for Enfusion Engine / Arma Reforger SDK
 > Repo: [github.com/s0wingseason/enfusion-mcp](https://github.com/s0wingseason/enfusion-mcp)
 
 ---
@@ -30,7 +30,7 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 
 ---
 
-## Tool Reference (45 tools)
+## Tool Reference (55 tools)
 
 ### Core / Status
 
@@ -61,6 +61,8 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 | `enfusion_project_info` | Parse .gproj: ID, GUID, dependencies, warnings | ✅ |
 | `enfusion_create_project` | Generate a new mod .gproj with platform dependencies | ❌ |
 | `enfusion_file_stats` | Project health: file counts by type, LOC, etc. | ✅ |
+| `enfusion_git_status` | Show git branch, porcelain changes, and recent commits | ✅ |
+| `enfusion_config_template` | Generate a server configuration JSON template for Reforger | ✅ |
 
 ### Script Analysis (Enforce Script / .c)
 
@@ -75,6 +77,11 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 | `enfusion_script_complexity` | Function complexity metrics: line count, nesting depth, params | ✅ |
 | `enfusion_extract_strings` | Extract string literals for localization review | ✅ |
 | `enfusion_todo_scan` | Find TODO/FIXME/HACK/NOTE annotations project-wide | ✅ |
+| `enfusion_lint_script` | Enforce Script linter: catch blocks, missing super, naming, magic numbers | ✅ |
+| `enfusion_dead_code` | Find potentially unused classes/functions (excluding engine callbacks) | ✅ |
+| `enfusion_api_doc` | Generate markdown API documentation from codebase symbols | ✅ |
+| `enfusion_modded_overrides` | Catalog all modded class overrides and their modified methods | ✅ |
+| `enfusion_file_outline` | IDE-style structured outline of declarations and methods with lines | ✅ |
 | `enfusion_parse_diagnostics` | Parse Workbench compiler output for errors/warnings | ✅ |
 
 ### Resource & Prefab Analysis
@@ -93,6 +100,8 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 | `enfusion_validate_references` | Check {GUID}path refs against .meta records — resolved vs missing | ✅ |
 | `enfusion_unused_resources` | Find orphaned .meta resources not referenced anywhere | ✅ |
 | `enfusion_server_config` | Parse Reforger server JSON: scenario, mods, ports, players | ✅ |
+| `enfusion_prefab_tree` | Build prefab inheritance hierarchy, roots, and orphan chains | ✅ |
+| `enfusion_summarize` | High-level summary of any file (type, symbols, entities, refs, LOC) | ✅ |
 
 ### Search & Refactoring
 
@@ -102,6 +111,7 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 | `enfusion_grep_context` | Literal search with surrounding context lines (grep -C style) | ✅ |
 | `enfusion_compare_files` | Unified diff between two project files | ✅ |
 | `enfusion_rename_symbol` | Dry-run preview: rename a symbol across all files | ✅ |
+| `enfusion_bulk_replace` | In-place multi-file text replacement with automatic backups | ❌ |
 
 ### Code Generation
 
@@ -123,7 +133,20 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 
 ## Version History
 
-### v0.4.0 (current)
+### v0.5.0 (current)
+- `enfusion_lint_script` — Enforce Script static analysis & linter
+- `enfusion_dead_code` — Detect dead/unreferenced functions and classes
+- `enfusion_api_doc` — Markdown documentation generator from symbols
+- `enfusion_modded_overrides` — Catalog all modded class overrides
+- `enfusion_prefab_tree` — Prefab inheritance hierarchy tree & orphan audit
+- `enfusion_summarize` — Single-file structural inspector & census
+- `enfusion_bulk_replace` — Multi-file batch replacement with backups
+- `enfusion_git_status` — Local repository branch, diff, and commit log
+- `enfusion_config_template` — Arma Reforger dedicated server JSON boilerplate generator
+- `enfusion_file_outline` — IDE outline / symbol view with line numbers
+- 74 integration tests across 6 suites
+
+### v0.4.0
 - `enfusion_todo_scan` — Find TODO/FIXME/HACK/NOTE annotations
 - `enfusion_find_references` — Symbol usage search (declarations vs usages)
 - `enfusion_duplicate_classes` — Detect duplicate class declarations
@@ -162,26 +185,17 @@ The server auto-discovers your Enfusion SDK projects from `~/.config/enfusion-mc
 
 ## Feature Roadmap
 
-### Near-term (v0.5.0)
-- [ ] **`enfusion_lint_script`** — Basic Enforce Script linter: naming conventions, missing super calls, unused variables
-- [ ] **`enfusion_dead_code`** — Detect unreachable or unused functions/classes
-- [ ] **`enfusion_inline_doc`** — Generate API documentation from class/function signatures
-- [ ] **`enfusion_bulk_write`** — Atomic multi-file write (apply rename_symbol results in one call)
-- [ ] **`enfusion_git_status`** — Show git diff/status for the project directory
-- [ ] **`enfusion_watch`** — File system watcher for auto-rebuild triggers
-
-### Medium-term (v0.6.0)
-- [ ] **LSP integration** — Basic Language Server Protocol support for IDE features
+### Near-term (v0.6.0)
+- [ ] **LSP integration** — Basic Language Server Protocol support for IDE code completion
 - [ ] **`enfusion_test_runner`** — Run Enforce script unit tests via Workbench CLI
-- [ ] **`enfusion_profiler`** — Parse Workbench profiling output
-- [ ] **`enfusion_asset_preview`** — Generate text descriptions of binary assets (models, textures)
-- [ ] **`enfusion_mod_publish`** — Automate Steam Workshop upload preparation
+- [ ] **`enfusion_profiler`** — Parse Workbench profiling and memory output
+- [ ] **`enfusion_mod_publish`** — Automate Steam Workshop upload preparation & manifest check
 - [ ] **`enfusion_config_validate`** — Schema-based validation for .conf/.json files
 
 ### Long-term
 - [ ] **Multi-project workspaces** — Cross-project dependency resolution
 - [ ] **AI-powered refactoring** — Suggest modded class patterns based on intent
-- [ ] **Workbench RPC bridge** — Direct communication with running Workbench
+- [ ] **Workbench RPC bridge** — Direct communication with running Workbench instance
 - [ ] **Prefab visual tree** — Mermaid diagram generation for entity hierarchies
 - [ ] **Performance advisor** — Flag entity-heavy prefabs, large scripts, deep nesting
 
@@ -215,7 +229,7 @@ Config file: `~/.config/enfusion-mcp/config.json`
 src/
   cli.ts         — Entry point (stdio transport)
   config.ts      — Zod schema validation, version constant
-  server.ts      — All 45 tool registrations on McpServer
+  server.ts      — All 55 tool registrations on McpServer
   analysis.ts    — Parsing/analysis functions (pure, no I/O)
   workspace.ts   — File I/O with path safety, backup, conflict detection
   workbench.ts   — Workbench process spawning and validation
@@ -226,6 +240,7 @@ tests/
   v020.test.mjs  — v0.2.0 tool tests
   v030.test.mjs  — v0.3.0 tool tests
   v040.test.mjs  — v0.4.0 tool tests
+  v050.test.mjs  — v0.5.0 tool tests
   package.test.mjs   — Release zip validation
   workspace.test.mjs — Workspace security/safety tests
 ```

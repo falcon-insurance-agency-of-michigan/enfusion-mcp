@@ -24,5 +24,5 @@ test('versioned release contains only distributable files and works without inst
   for (const manifest of ['plugin.json', '.codex-plugin/plugin.json']) assert.equal(JSON.parse(await readFile(path.join(root, manifest), 'utf8')).version, pkg.version);
   const { client } = await connect(t, configPath, 'legacy', path.join(root, 'dist/server.cjs'));
   assert.equal((await call(client, 'enfusion_status')).version, pkg.version);
-  assert.equal((await client.listTools()).tools.length, 45);
+  assert.equal((await client.listTools()).tools.length, 55);
 });
