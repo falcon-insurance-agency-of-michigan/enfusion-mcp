@@ -10,7 +10,8 @@
     "check": "npm run typecheck && npm test",
     "test:live": "node scripts/live-smoke.mjs",
     "release": "node scripts/package.mjs",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "install:ide": "node scripts/installer.mjs"
   },
   "keywords": [
     "mcp",
@@ -53,7 +54,11 @@
     "examples",
     "README.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "install.bat",
+    "install.ps1",
+    "scripts/installer.mjs",
+    "TOOLS.md"
   ],
   "repository": {
     "url": "https://github.com/s0wingseason/enfusion-mcp.git",

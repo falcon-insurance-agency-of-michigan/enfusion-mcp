@@ -5,7 +5,17 @@
 
 ---
 
-## Quick Start
+## Quick Start: One-Click Multi-IDE Installer
+
+Install Enfusion MCP into **Claude Code, OpenAI Codex, Claude Desktop, Cursor, Windsurf, VS Code (Cline & Roo Code), Continue.dev, Google Antigravity, or Zed** with a single command or double-click:
+
+- **Windows Explorer**: Double-click `install.bat`
+- **PowerShell (Interactive Console)**: `.\install.ps1`
+- **PowerShell (Graphical GUI Dialog)**: `.\install.ps1 -Gui`
+- **NPM Script**: `npm run install:ide`
+- **Automated / All Detected**: `node scripts/installer.mjs --detected` or `.\install.ps1 -Detected`
+
+### Manual Configuration
 
 ```jsonc
 // Claude Code (~/.claude/settings.json)
